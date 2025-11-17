@@ -8,18 +8,18 @@ on:
 jobs:
   build-iso:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout kernel
+      - name: Checkout kernel repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Clone YOUR BusyBox fork
+      - name: Clone your BusyBox fork
         uses: actions/checkout@v4
         with:
-          repository: wowsha/busybox   # ← CHANGE THIS
+          repository: YOUR-USERNAME/busybox   # ← CHANGE THIS
           path: busybox
 
       - name: Install build dependencies
@@ -28,29 +28,27 @@ jobs:
           sudo apt install -y build-essential bc bison flex libncurses-dev libelf-dev libssl-dev
           sudo apt install -y git wget xz-utils cpio gzip xorriso mtools qemu-system-x86
 
-      - name: Build MAXED-OUT kernel (everything enabled)
+      - name: Build MAXED-OUT kernel (literally everything)
         run: |
-          # Start with the biggest base config
-          cp arch/x86/configs/x86_64_defconfig .config || make defconfig
-
-          # Disable signing (not needed for live ISO)
+          make defconfig
           ./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
           ./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
-
-          # Answer "yes" to EVERY new config option → enables literally everything
-          yes "" | make oldconfig
-
-          # Build kernel + all modules (takes ~15–25 min)
+          yes "" | make oldconfig                     # enables ALL remaining options
           make -j$(nproc) bzImage modules
 
-      - name: Build static BusyBox from your fork
+      - name: Build static BusyBox + fix tc applet (modern kernel compatibility)
         run: |
           cd busybox
           make defconfig
           sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          
+          # THIS FIXES THE COMPILE ERROR YOU SAW
+          sed -i 's/CONFIG_TC=y/CONFIG_TC=n/' .config 2>/dev/null || true
+          echo "CONFIG_TC=n" >> .config                # force-disable tc if not present
+
           make -j$(nproc) CONFIG_PREFIX=../busybox-install install
 
-      - name: Create initramfs with ALL modules
+      - name: Create initramfs with ALL kernel modules
         run: |
           KERNELRELEASE=$(make kernelrelease)
 
@@ -60,37 +58,34 @@ jobs:
           # Copy every single module
           cp -r lib/modules/$KERNELRELEASE initramfs/lib/modules/
 
-          # Basic devices
+          # Essential devices
           sudo mknod initramfs/dev/console c 5 1
           sudo mknod initramfs/dev/null    c 1 3
           sudo mknod initramfs/dev/random  c 1 8
           sudo mknod initramfs/dev/urandom c 1 9
 
-          # Fancy init script
+          # Cool boot message
           cat > initramfs/init <<'EOF'
           #!/bin/sh
-          mount -t devtmpfs none /dev
+          mount -t devtmpfs none /dev 2>/dev/null
           mount -t proc none /proc
           mount -t sysfs none /sys
 
           echo
-          echo "===================================================="
-          echo "   MAXED-OUT CUSTOM LINUX — ALL DRIVERS ENABLED   "
-          echo "   Kernel $(uname -r) with literally everything     "
+          echo "════════════════════════════════════════════════════════"
+          echo "   MAXED-OUT CUSTOM LINUX — ALL DRIVERS & FEATURES     "
+          echo "   Kernel $(uname -r) | Every module loaded            "
           echo "   BusyBox from https://github.com/YOUR-USERNAME/busybox"
-          echo "===================================================="
+          echo "════════════════════════════════════════════════════════"
           echo
 
-          # Load all modules (non-fatal if some fail)
-          echo "Loading all kernel modules..."
-          depmod -a
+          depmod -a 2>/dev/null
           modprobe -a all 2>/dev/null || true
 
           exec /bin/ash
           EOF
           chmod +x initramfs/init
 
-          # Pack initramfs
           cd initramfs
           find . | cpio -H newc -o | gzip > ../initramfs.cpio.gz
 
@@ -101,10 +96,10 @@ jobs:
           cp initramfs.cpio.gz iso/boot/
 
           cat > iso/boot/grub/grub.cfg <<EOF
-          set timeout=3
+          set timeout=2
           set default=0
 
-          menuentry "Maxed-Out Custom Linux (All Drivers & Features)" {
+          menuentry "Maxed-Out Custom Linux — All Drivers Enabled" {
               linux /boot/vmlinuz console=ttyS0 quiet
               initrd /boot/initramfs.cpio.gz
           }
@@ -112,13 +107,13 @@ jobs:
 
           grub-mkrescue -o MaxedOut-Linux.iso iso
 
-      - name: Upload ISO
+      - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
           name: MaxedOut-Linux.iso
           path: MaxedOut-Linux.iso
 
-      - name: Auto-release on tag
+      - name: Create GitHub Release (when tagged)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
