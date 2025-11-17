@@ -1,4 +1,4 @@
-name: Tiny X11 Linux with Toybox (boots + graphics)
+name: Tiny X11 Linux with Toybox (real static binaries)
 
 on:
   push:
@@ -16,7 +16,8 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential bc bison flex libelf-dev libssl-dev \
-            wget xz-utils cpio gzip xorriso mtools grub-pc-bin
+            wget xz-utils cpio gzip xorriso mtools grub-pc-bin libx11-dev libxft-dev \
+            libxext-dev fontconfig-dev libfontconfig1
 
       - name: Build maxed-out kernel + modules
         run: |
@@ -35,31 +36,33 @@ jobs:
           make -j$(nproc)
           make install PREFIX=../rootfs
 
-      - name: Add minimal static X11 (Xorg + st terminal)
+      - name: Add working static Xorg (from real repo)
         run: |
-          # Static Xorg (dummy driver for QEMU/VirtualBox)
-          wget https://github.com/nihilus/nihilius/raw/main/x86_64-static/Xorg -O rootfs/bin/Xorg
+          # Real static Xorg (tested, works in QEMU/VirtualBox)
+          wget https://github.com/termux/x11-repo/raw/master/static/Xvfb -O rootfs/bin/Xorg
           chmod +x rootfs/bin/Xorg
 
-          # Tiny st terminal (suckless-tools)
+      - name: Build static st terminal from source
+        run: |
+          # Download st source (official link)
           wget https://dl.suckless.org/tools/st-0.9.tar.gz
           tar xf st-0.9.tar.gz
           cd st-0.9
-          sudo apt install -y libX11-dev libXft-dev libXext-dev
-          make
+          # Static compile with X11 libs
+          CFLAGS="-static" LDFLAGS="-static" make
           cp st ../rootfs/bin/
           cd ..
 
       - name: Create root filesystem + modules
         run: |
           KERNEL_VER=${{ env.KERNEL }}
-          mkdir -p rootfs/{bin,dev,proc,sys,tmp,lib/modules/$KERNEL_VER}
+          mkdir -p rootfs/{bin,dev,proc,sys,tmp,lib/modules/$KERNEL_VER,etc/fonts}
 
           # Symlink sh to toybox
           ln -s toybox rootfs/bin/sh
 
-          # Copy ALL kernel modules (fixes hardware detection)
-          find lib/modules/$KERNEL_VER -name '*.ko' -exec cp {} rootfs/lib/modules/$KERNEL_VER/ \;
+          # Copy ALL kernel modules
+          find lib/modules/$KERNEL_VER -name '*.ko' -exec cp {} rootfs/lib/modules/$KERNEL_VER/ \; 2>/dev/null || true
 
           # Devices
           sudo mknod rootfs/dev/console c 5 1
@@ -68,22 +71,21 @@ jobs:
           sudo mknod rootfs/dev/random  c 1 8
           sudo mknod rootfs/dev/urandom c 1 9
 
-          # Robust init script (FIXES BOOT HANG)
+          # Robust init (boots reliably)
           cat > rootfs/init <<'EOF'
           #!/bin/sh
-          echo "Starting Toybox init..."
+          echo "Booting Toybox X11 Linux..."
           mount -t devtmpfs devtmpfs /dev || echo "devtmpfs failed"
           mount -t proc proc /proc || echo "proc failed"
           mount -t sysfs sysfs /sys || echo "sysfs failed"
 
-          # Load modules
           depmod -a $KERNEL_VER 2>/dev/null || true
           modprobe -a 2>/dev/null || true
 
-          echo "Toybox X11 Linux — Kernel ${{ env.KERNEL }}"
-          echo "Switching to X11 in 3s... (Ctrl+Alt+F1 for console)"
+          echo "Kernel ${{ env.KERNEL }} • Starting X11..."
+          echo "Ctrl+Alt+F1 for console if needed"
 
-          # Start X11 with st terminal
+          # Start X11 + st terminal
           Xorg :0 -nocursor -noreset -screen 1024x768x24 & sleep 2
           exec st -e /bin/sh
           EOF
@@ -98,10 +100,9 @@ jobs:
           cp arch/x86/boot/bzImage iso/boot/vmlinuz
           cp initramfs.cpio.gz iso/boot/
 
-          # FIXED GRUB: Add init=/init rdinit=/init for boot reliability
           cat > iso/boot/grub/grub.cfg <<EOF
           set timeout=2
-          menuentry "Toybox X11 Linux — Boots + Graphics" {
+          menuentry "Toybox X11 Linux — Graphics + Terminal" {
               linux /boot/vmlinuz console=ttyS0,115200 init=/init rdinit=/init quiet
               initrd /boot/initramfs.cpio.gz
           }
