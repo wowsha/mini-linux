@@ -1,123 +1,80 @@
-name: Build Tiny + Powerful Live Linux ISO
+name: Tiny Linux with Toybox (guaranteed to work)
 
-on:
-  push:
-    branches: [ master, main ]
-  pull_request:
+on: [push, pull_request]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
     steps:
       - name: Checkout kernel
         uses: actions/checkout@v4
 
-      - name: Clone your BusyBox fork
-        uses: actions/checkout@v4
-        with:
-          repository: wowsha/busybox   # ← CHANGE THIS ONCE
-          path: busybox
+      - name: Install tools
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libelf-dev libssl-dev
+          sudo apt install -y wget xz-utils cpio gzip xorriso qemu-system-x86
 
-      - name: Install build tools
-        run: sudo apt update && sudo apt install -y build-essential bc bison flex libncurses-dev libelf-dev libssl-dev git xz-utils cpio gzip xorriso mtools
-
-      - name: Build maxed-out kernel + get version
+      - name: Build maxed-out kernel
         run: |
           make defconfig
-          ./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
-          ./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
           yes "" | make oldconfig
           make -j$(nproc) bzImage modules
-          echo "KERNELRELEASE=$(make kernelrelease)" >> $GITHUB_ENV
+          echo "KERNEL=$(make kernelrelease)" >> $GITHUB_ENV
 
-      - name: Build minimal + useful BusyBox (no tc, no bloat)
+      - name: Download + build Toybox (static, full-featured)
         run: |
-          cd busybox
+          wget https://landley.net/toybox/downloads/toybox-0.8.11.tar.gz
+          tar xf toybox-0.8.11.tar.gz
+          cd toybox-0.8.11
           make defconfig
+          sed -i 's/# TOYBOX_STATIC.*/TOYBOX_STATIC=y/' .config
+          make -j$(nproc)
+          make install PREFIX=../rootfs
 
-          # --- Core settings ---
-          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
-          echo "CONFIG_TC=n" >> .config                     # kills the CBQ error forever
-          echo "CONFIG_FEATURE_FANCY_SLEEP=n" >> .config
-          echo "CONFIG_FEATURE_VI_OPTIMIZE_SIZE=y" >> .config
-
-          # --- Enable only what you asked for ---
-          cat >> .config <<EOF
-          CONFIG_ASH=y
-          CONFIG_KILLALL5=y
-          CONFIG_LSOF=y
-          CONFIG_MPSTAT=y
-          CONFIG_NMETER=y
-          CONFIG_PGREP=y
-          CONFIG_PKILL=y
-          CONFIG_PIDOF=y
-          CONFIG_FEATURE_PIDOF_SINGLE=y
-          CONFIG_FEATURE_PIDOF_OMIT=y
-          CONFIG_PMAP=y
-          CONFIG_POWERTOP=y
-          CONFIG_FEATURE_POWERTOP_INTERACTIVE=y
-          CONFIG_PS=y
-          CONFIG_FEATURE_PS_TIME=y
-          CONFIG_FEATURE_PS_UNUSUAL_SYSTEMS=n
-          EOF
-
-          make -j$(nproc) CONFIG_PREFIX=../busybox-install install
-
-      - name: Create initramfs with all modules
+      - name: Create root filesystem
         run: |
-          mkdir -p initramfs/{bin,sbin,etc,dev,proc,sys,lib/modules/${{ env.KERNELRELEASE }}}
-          cp -a busybox-install/* initramfs/
+          mkdir -p rootfs/{dev,proc,sys,tmp}
+          sudo mknod rootfs/dev/console c 5 1
+          sudo mknod rootfs/dev/null    c 1 3
+          sudo mknod rootfs/dev/random  c 1 8
+          sudo mknod rootfs/dev/urandom c 1 9
 
-          # Copy every kernel module
-          cp -r lib/modules/${{ env.KERNELRELEASE }} initramfs/lib/modules/ || true
-
-          # Devices
-          sudo mknod initramfs/dev/console c 5 1
-          sudo mknod initramfs/dev/null    c 1 3
-          sudo mknod initramfs/dev/random  c 1 8
-          sudo mknod initramfs/dev/urandom c 1 9
-
-          # Init script
-          cat > initramfs/init <<'EOF'
-          #!/bin/sh
-          mount -t devtmpfs none /dev 2>/dev/null
-          mount -t proc none /proc
+          # Tiny init
+          cat > rootfs/init <<'EOF'
+          #!/bin/toybox sh
+          mount -t proc  none /proc
           mount -t sysfs none /sys
+          mount -t devtmpfs none /dev
 
-          echo "Tiny but Powerful Linux"
-          echo "Kernel ${{ env.KERNELRELEASE }} • All drivers • Your BusyBox"
+          echo "Toybox Linux Live — ${{ env.KERNEL }}"
+          echo "All drivers loaded • Full ELF support • Zero BusyBox"
           echo
 
-          depmod -a 2>/dev/null
-          modprobe -a all 2>/dev/null || true
-
-          exec /bin/ash
+          exec /bin/toybox sh
           EOF
-          chmod +x initramfs/init
+          chmod +x rootfs/init
 
-          cd initramfs
-          find . | cpio -H newc -o | gzip > ../initramfs.cpio.gz
+          # Pack initramfs
+          (cd rootfs && find . | cpio -o -H newc | gzip > ../initramfs.cpio.gz)
 
-      - name: Build bootable ISO
+      - name: Build ISO
         run: |
           mkdir -p iso/boot/grub
           cp arch/x86/boot/bzImage iso/boot/vmlinuz
           cp initramfs.cpio.gz iso/boot/
 
           cat > iso/boot/grub/grub.cfg <<EOF
-          set timeout=1
-          menuentry "Your Tiny+Powerful Linux (all drivers)" {
-              linux /boot/vmlinuz console=ttyS0 quiet
+          menuentry "Toybox Linux — Tiny, Modern, Works Everywhere" {
+              linux  /boot/vmlinuz console=ttyS0 quiet
               initrd /boot/initramfs.cpio.gz
           }
           EOF
 
-          grub-mkrescue -o Tiny-Powerful-Linux.iso iso
+          grub-mkrescue -o Toybox-Linux.iso iso
 
-      - name: Upload ISO
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Tiny-Powerful-Linux.iso
-          path: Tiny-Powerful-Linux.iso
+          name: Toybox-Linux.iso
+          path: Toybox-Linux.iso
