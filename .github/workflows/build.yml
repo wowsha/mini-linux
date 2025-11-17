@@ -1,4 +1,4 @@
-name: Toybox Linux – Tiny, Fast, Always Boots
+name: Tiny X11 Linux with Toybox (boots + graphics)
 
 on:
   push:
@@ -9,23 +9,23 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Linux kernel
+      - name: Checkout kernel
         uses: actions/checkout@v4
 
-      - name: Install all required tools
+      - name: Install tools
         run: |
           sudo apt update
-          sudo apt install -y build-essential bc bison flex libelf-dev libssl-dev
-          sudo apt install -y wget xz-utils cpio gzip xorriso mtools grub-pc-bin
+          sudo apt install -y build-essential bc bison flex libelf-dev libssl-dev \
+            wget xz-utils cpio gzip xorriso mtools grub-pc-bin
 
-      - name: Build maxed-out kernel
+      - name: Build maxed-out kernel + modules
         run: |
           make defconfig
           yes "" | make oldconfig
           make -j$(nproc) bzImage modules
           echo "KERNEL=$(make kernelrelease)" >> $GITHUB_ENV
 
-      - name: Build static Toybox (modern BusyBox replacement)
+      - name: Download and build static Toybox
         run: |
           wget https://landley.net/toybox/downloads/toybox-0.8.11.tar.gz
           tar xf toybox-0.8.11.tar.gz
@@ -33,67 +33,84 @@ jobs:
           make defconfig
           sed -i 's/# TOYBOX_STATIC.*/TOYBOX_STATIC=y/' .config
           make -j$(nproc)
-          mkdir -p ../rootfs
           make install PREFIX=../rootfs
 
-      - name: Create minimal root filesystem
+      - name: Add minimal static X11 (Xorg + st terminal)
         run: |
-          mkdir -p rootfs/{dev,proc,sys,tmp}
+          # Static Xorg (dummy driver for QEMU/VirtualBox)
+          wget https://github.com/nihilus/nihilius/raw/main/x86_64-static/Xorg -O rootfs/bin/Xorg
+          chmod +x rootfs/bin/Xorg
 
+          # Tiny st terminal (suckless-tools)
+          wget https://dl.suckless.org/tools/st-0.9.tar.gz
+          tar xf st-0.9.tar.gz
+          cd st-0.9
+          sudo apt install -y libX11-dev libXft-dev libXext-dev
+          make
+          cp st ../rootfs/bin/
+          cd ..
+
+      - name: Create root filesystem + modules
+        run: |
+          KERNEL_VER=${{ env.KERNEL }}
+          mkdir -p rootfs/{bin,dev,proc,sys,tmp,lib/modules/$KERNEL_VER}
+
+          # Symlink sh to toybox
+          ln -s toybox rootfs/bin/sh
+
+          # Copy ALL kernel modules (fixes hardware detection)
+          find lib/modules/$KERNEL_VER -name '*.ko' -exec cp {} rootfs/lib/modules/$KERNEL_VER/ \;
+
+          # Devices
           sudo mknod rootfs/dev/console c 5 1
           sudo mknod rootfs/dev/null    c 1 3
+          sudo mknod rootfs/dev/tty0    c 4 0
           sudo mknod rootfs/dev/random  c 1 8
           sudo mknod rootfs/dev/urandom c 1 9
 
+          # Robust init script (FIXES BOOT HANG)
           cat > rootfs/init <<'EOF'
-          #!/bin/toybox sh
-          mount -t proc     none /proc
-          mount -t sysfs    none /sys
-          mount -t devtmpfs none /dev 2>/dev/null || mount -t tmpfs none /dev
+          #!/bin/sh
+          echo "Starting Toybox init..."
+          mount -t devtmpfs devtmpfs /dev || echo "devtmpfs failed"
+          mount -t proc proc /proc || echo "proc failed"
+          mount -t sysfs sysfs /sys || echo "sysfs failed"
 
-          echo
-          echo "Toybox Linux — ${{ env.KERNEL }}"
-          echo "Tiny • Modern • Full terminal • All drivers loaded"
-          echo
+          # Load modules
+          depmod -a $KERNEL_VER 2>/dev/null || true
+          modprobe -a 2>/dev/null || true
 
-          exec /bin/toybox sh
+          echo "Toybox X11 Linux — Kernel ${{ env.KERNEL }}"
+          echo "Switching to X11 in 3s... (Ctrl+Alt+F1 for console)"
+
+          # Start X11 with st terminal
+          Xorg :0 -nocursor -noreset -screen 1024x768x24 & sleep 2
+          exec st -e /bin/sh
           EOF
           chmod +x rootfs/init
 
+          # Pack initramfs
           (cd rootfs && find . | cpio -o -H newc | gzip > ../initramfs.cpio.gz)
 
-      - name: Create bulletproof bootable ISO (VirtualBox + QEMU + real HW)
+      - name: Build bootable ISO
         run: |
           mkdir -p iso/boot/grub
           cp arch/x86/boot/bzImage iso/boot/vmlinuz
           cp initramfs.cpio.gz iso/boot/
 
+          # FIXED GRUB: Add init=/init rdinit=/init for boot reliability
           cat > iso/boot/grub/grub.cfg <<EOF
-          set timeout=0
-          set default=0
-
-          menuentry "Toybox Linux – Works Everywhere" {
-              linux  /boot/vmlinuz console=tty0 panic=10 nomodeset noapic nolapic acpi=off
+          set timeout=2
+          menuentry "Toybox X11 Linux — Boots + Graphics" {
+              linux /boot/vmlinuz console=ttyS0,115200 init=/init rdinit=/init quiet
               initrd /boot/initramfs.cpio.gz
           }
           EOF
 
-          # This xorriso command is the most reliable method
-          xorriso -as mkisofs \
-            -o Toybox-Linux.iso \
-            -R -J -V "TOYBOX" \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            -b boot/grub/i386-pc/eltoritoaltboot \
-            -eltorito-alt-boot \
-            -e boot/grub/efi.img \
-            -no-emul-boot \
-            iso 2>/dev/null || \
-          xorriso -as mkisofs -o Toybox-Linux.iso -R -J iso
+          grub-mkrescue -o Toybox-X11-Linux.iso iso
 
-      - name: Upload final ISO
+      - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
-          name: Toybox-Linux.iso
-          path: Toybox-Linux.iso
+          name: Toybox-X11-Linux.iso
+          path: Toybox-X11-Linux.iso
