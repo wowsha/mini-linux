@@ -1,6 +1,9 @@
 name: Tiny Linux with Toybox (guaranteed to work)
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
 
 jobs:
   build:
@@ -9,11 +12,11 @@ jobs:
       - name: Checkout kernel
         uses: actions/checkout@v4
 
-      - name: Install tools (FIXED: added mtools)
+      - name: Install tools (including mtools fix)
         run: |
           sudo apt update
-          sudo apt install -y build-essential bc bison flex libelf-dev libssl-dev
-          sudo apt install -y wget xz-utils cpio gzip xorriso mtools grub-pc-bin  # ← FIXED HERE
+          sudo apt install -y build-essential bc bison flex libelf-dev libssl-dev \
+            wget xz-utils cpio gzip xorriso mtools grub-pc-bin
 
       - name: Build maxed-out kernel
         run: |
@@ -22,7 +25,7 @@ jobs:
           make -j$(nproc) bzImage modules
           echo "KERNEL=$(make kernelrelease)" >> $GITHUB_ENV
 
-      - name: Download + build Toybox (static, full-featured)
+      - name: Download and build static Toybox
         run: |
           wget https://landley.net/toybox/downloads/toybox-0.8.11.tar.gz
           tar xf toybox-0.8.11.tar.gz
@@ -40,32 +43,30 @@ jobs:
           sudo mknod rootfs/dev/random  c 1 8
           sudo mknod rootfs/dev/urandom c 1 9
 
-          # Tiny init
           cat > rootfs/init <<'EOF'
           #!/bin/toybox sh
-          mount -t proc  none /proc
-          mount -t sysfs none /sys
+          mount -t proc     none /proc
+          mount -t sysfs    none /sys
           mount -t devtmpfs none /dev
 
           echo "Toybox Linux Live — ${{ env.KERNEL }}"
-          echo "All drivers loaded • Full ELF support • Zero BusyBox"
+          echo "All drivers • Full ELF • Real terminal"
           echo
 
           exec /bin/toybox sh
           EOF
           chmod +x rootfs/init
 
-          # Pack initramfs
           (cd rootfs && find . | cpio -o -H newc | gzip > ../initramfs.cpio.gz)
 
-      - name: Build ISO
+      - name: Build bootable ISO
         run: |
           mkdir -p iso/boot/grub
           cp arch/x86/boot/bzImage iso/boot/vmlinuz
           cp initramfs.cpio.gz iso/boot/
 
           cat > iso/boot/grub/grub.cfg <<EOF
-          menuentry "Toybox Linux — Tiny, Modern, Works Everywhere" {
+          menuentry "Toybox Linux – Tiny, Modern, Works Everywhere" {
               linux  /boot/vmlinuz console=ttyS0 quiet
               initrd /boot/initramfs.cpio.gz
           }
@@ -73,7 +74,7 @@ jobs:
 
           grub-mkrescue -o Toybox-Linux.iso iso
 
-      - name: Upload
+      - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
           name: Toybox-Linux.iso
