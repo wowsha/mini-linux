@@ -9,11 +9,11 @@ jobs:
       - name: Checkout kernel
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install tools (FIXED: added mtools)
         run: |
           sudo apt update
           sudo apt install -y build-essential bc bison flex libelf-dev libssl-dev
-          sudo apt install -y wget xz-utils cpio gzip xorriso qemu-system-x86
+          sudo apt install -y wget xz-utils cpio gzip xorriso mtools grub-pc-bin  # ← FIXED HERE
 
       - name: Build maxed-out kernel
         run: |
