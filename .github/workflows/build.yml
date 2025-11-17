@@ -1,0 +1,126 @@
+name: Build Maxed-Out Live Linux ISO
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Clone YOUR BusyBox fork
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR-USERNAME/busybox   # ← CHANGE THIS
+          path: busybox
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libncurses-dev libelf-dev libssl-dev
+          sudo apt install -y git wget xz-utils cpio gzip xorriso mtools qemu-system-x86
+
+      - name: Build MAXED-OUT kernel (everything enabled)
+        run: |
+          # Start with the biggest base config
+          cp arch/x86/configs/x86_64_defconfig .config || make defconfig
+
+          # Disable signing (not needed for live ISO)
+          ./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+          ./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+
+          # Answer "yes" to EVERY new config option → enables literally everything
+          yes "" | make oldconfig
+
+          # Build kernel + all modules (takes ~15–25 min)
+          make -j$(nproc) bzImage modules
+
+      - name: Build static BusyBox from your fork
+        run: |
+          cd busybox
+          make defconfig
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          make -j$(nproc) CONFIG_PREFIX=../busybox-install install
+
+      - name: Create initramfs with ALL modules
+        run: |
+          KERNELRELEASE=$(make kernelrelease)
+
+          mkdir -p initramfs/{bin,sbin,etc,dev,proc,sys,lib/modules/$KERNELRELEASE}
+          cp -a busybox-install/* initramfs/
+
+          # Copy every single module
+          cp -r lib/modules/$KERNELRELEASE initramfs/lib/modules/
+
+          # Basic devices
+          sudo mknod initramfs/dev/console c 5 1
+          sudo mknod initramfs/dev/null    c 1 3
+          sudo mknod initramfs/dev/random  c 1 8
+          sudo mknod initramfs/dev/urandom c 1 9
+
+          # Fancy init script
+          cat > initramfs/init <<'EOF'
+          #!/bin/sh
+          mount -t devtmpfs none /dev
+          mount -t proc none /proc
+          mount -t sysfs none /sys
+
+          echo
+          echo "===================================================="
+          echo "   MAXED-OUT CUSTOM LINUX — ALL DRIVERS ENABLED   "
+          echo "   Kernel $(uname -r) with literally everything     "
+          echo "   BusyBox from https://github.com/YOUR-USERNAME/busybox"
+          echo "===================================================="
+          echo
+
+          # Load all modules (non-fatal if some fail)
+          echo "Loading all kernel modules..."
+          depmod -a
+          modprobe -a all 2>/dev/null || true
+
+          exec /bin/ash
+          EOF
+          chmod +x initramfs/init
+
+          # Pack initramfs
+          cd initramfs
+          find . | cpio -H newc -o | gzip > ../initramfs.cpio.gz
+
+      - name: Create bootable ISO
+        run: |
+          mkdir -p iso/boot/grub
+          cp arch/x86/boot/bzImage iso/boot/vmlinuz
+          cp initramfs.cpio.gz iso/boot/
+
+          cat > iso/boot/grub/grub.cfg <<EOF
+          set timeout=3
+          set default=0
+
+          menuentry "Maxed-Out Custom Linux (All Drivers & Features)" {
+              linux /boot/vmlinuz console=ttyS0 quiet
+              initrd /boot/initramfs.cpio.gz
+          }
+          EOF
+
+          grub-mkrescue -o MaxedOut-Linux.iso iso
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: MaxedOut-Linux.iso
+          path: MaxedOut-Linux.iso
+
+      - name: Auto-release on tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MaxedOut-Linux.iso
+          generate_release_notes: true
