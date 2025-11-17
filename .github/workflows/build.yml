@@ -1,4 +1,4 @@
-name: Build Maxed-Out Live Linux ISO
+name: Build Tiny + Powerful Live Linux ISO
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  build-iso:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -20,59 +20,74 @@ jobs:
           repository: wowsha/busybox   # ← CHANGE THIS ONCE
           path: busybox
 
-      - name: Install dependencies
-        run: sudo apt update && sudo apt install -y build-essential bc bison flex libncurses-dev libelf-dev libssl-dev git wget xz-utils cpio gzip xorriso mtools
+      - name: Install build tools
+        run: sudo apt update && sudo apt install -y build-essential bc bison flex libncurses-dev libelf-dev libssl-dev git xz-utils cpio gzip xorriso mtools
 
-      - name: Build MAXED-OUT kernel + get version
+      - name: Build maxed-out kernel + get version
         run: |
           make defconfig
           ./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
           ./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
           yes "" | make oldconfig
           make -j$(nproc) bzImage modules
-
-          # Save kernel version for later steps
           echo "KERNELRELEASE=$(make kernelrelease)" >> $GITHUB_ENV
 
-      - name: Build static BusyBox (tc disabled + warnings silenced)
+      - name: Build minimal + useful BusyBox (no tc, no bloat)
         run: |
           cd busybox
           make defconfig
 
-          # Static + disable broken tc applet (the real fix)
+          # --- Core settings ---
           sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
-          echo "CONFIG_TC=n" >> .config
-          echo "CONFIG_FEATURE_TC_INGRESS=y" >> .config || true
+          echo "CONFIG_TC=n" >> .config                     # kills the CBQ error forever
+          echo "CONFIG_FEATURE_FANCY_SLEEP=n" >> .config
+          echo "CONFIG_FEATURE_VI_OPTIMIZE_SIZE=y" >> .config
 
-          # Optional: silence all the noisy warnings you saw
-          echo "CONFIG_EXTRA_CFLAGS=\"-w\"" >> .config
+          # --- Enable only what you asked for ---
+          cat >> .config <<EOF
+          CONFIG_ASH=y
+          CONFIG_KILLALL5=y
+          CONFIG_LSOF=y
+          CONFIG_MPSTAT=y
+          CONFIG_NMETER=y
+          CONFIG_PGREP=y
+          CONFIG_PKILL=y
+          CONFIG_PIDOF=y
+          CONFIG_FEATURE_PIDOF_SINGLE=y
+          CONFIG_FEATURE_PIDOF_OMIT=y
+          CONFIG_PMAP=y
+          CONFIG_POWERTOP=y
+          CONFIG_FEATURE_POWERTOP_INTERACTIVE=y
+          CONFIG_PS=y
+          CONFIG_FEATURE_PS_TIME=y
+          CONFIG_FEATURE_PS_UNUSUAL_SYSTEMS=n
+          EOF
 
           make -j$(nproc) CONFIG_PREFIX=../busybox-install install
 
-      - name: Create initramfs with ALL modules
+      - name: Create initramfs with all modules
         run: |
           mkdir -p initramfs/{bin,sbin,etc,dev,proc,sys,lib/modules/${{ env.KERNELRELEASE }}}
           cp -a busybox-install/* initramfs/
 
-          # Copy modules from kernel source (now we're in the right dir)
-          cp -r lib/modules/${{ env.KERNELRELEASE }} initramfs/lib/modules/ || echo "No modules dir yet, skipping"
+          # Copy every kernel module
+          cp -r lib/modules/${{ env.KERNELRELEASE }} initramfs/lib/modules/ || true
 
+          # Devices
           sudo mknod initramfs/dev/console c 5 1
           sudo mknod initramfs/dev/null    c 1 3
           sudo mknod initramfs/dev/random  c 1 8
           sudo mknod initramfs/dev/urandom c 1 9
 
+          # Init script
           cat > initramfs/init <<'EOF'
           #!/bin/sh
           mount -t devtmpfs none /dev 2>/dev/null
           mount -t proc none /proc
           mount -t sysfs none /sys
 
-          echo "════════════════════════════════════════════════"
-          echo "  MAXED-OUT CUSTOM LINUX — ALL DRIVERS LOADED  "
-          echo "  Kernel ${{ env.KERNELRELEASE }}                     "
-          echo "  BusyBox from https://github.com/YOUR-USERNAME/busybox"
-          echo "════════════════════════════════════════════════"
+          echo "Tiny but Powerful Linux"
+          echo "Kernel ${{ env.KERNELRELEASE }} • All drivers • Your BusyBox"
           echo
 
           depmod -a 2>/dev/null
@@ -85,24 +100,24 @@ jobs:
           cd initramfs
           find . | cpio -H newc -o | gzip > ../initramfs.cpio.gz
 
-      - name: Create bootable ISO
+      - name: Build bootable ISO
         run: |
           mkdir -p iso/boot/grub
           cp arch/x86/boot/bzImage iso/boot/vmlinuz
           cp initramfs.cpio.gz iso/boot/
 
           cat > iso/boot/grub/grub.cfg <<EOF
-          set timeout=2
-          menuentry "Maxed-Out Custom Linux — Every Driver Known to Man" {
+          set timeout=1
+          menuentry "Your Tiny+Powerful Linux (all drivers)" {
               linux /boot/vmlinuz console=ttyS0 quiet
               initrd /boot/initramfs.cpio.gz
           }
           EOF
 
-          grub-mkrescue -o MaxedOut-Linux.iso iso
+          grub-mkrescue -o Tiny-Powerful-Linux.iso iso
 
       - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
-          name: MaxedOut-Linux.iso
-          path: MaxedOut-Linux.iso
+          name: Tiny-Powerful-Linux.iso
+          path: Tiny-Powerful-Linux.iso
